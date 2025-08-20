@@ -1,0 +1,38 @@
+{
+  "name": "detector-backend",
+  "version": "1.0.0",
+  "description": "Logo Detection API with GPU acceleration for Apple Silicon",
+  "main": "main.py",
+  "scripts": {
+    "start": "uv run python main.py",
+    "dev": "uv run python main.py --dev",
+    "test": "uv run python test_gpu.py",
+    "install": "uv sync",
+    "install:dev": "uv sync --extra dev",
+    "setup": "chmod +x start.sh && ./start.sh --help",
+    "setup:win": "start.bat --help"
+  },
+  "keywords": [
+    "logo-detection",
+    "yolo",
+    "fastapi",
+    "gpu-acceleration",
+    "apple-silicon",
+    "mps",
+    "computer-vision"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "engines": {
+    "python": ">=3.11",
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/detector-ui.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/detector-ui/issues"
+  },
+  "homepage": "https://github.com/yourusername/detector-ui#readme"
+}
