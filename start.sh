@@ -71,8 +71,24 @@ check_uv() {
             fi
         elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
             # Linux
+            print_status "Installing uv on Linux..."
             curl -LsSf https://astral.sh/uv/install.sh | sh
-            source ~/.bashrc 2>/dev/null || source ~/.zshrc 2>/dev/null
+            
+            # Source the environment file to add uv to PATH
+            if [ -f "$HOME/.local/bin/env" ]; then
+                source "$HOME/.local/bin/env"
+                print_success "Sourced uv environment"
+            else
+                print_warning "uv environment file not found, trying to add to PATH manually"
+                export PATH="$HOME/.local/bin:$PATH"
+            fi
+            
+            # Try to reload shell configuration
+            if [ -f "$HOME/.bashrc" ]; then
+                source "$HOME/.bashrc" 2>/dev/null
+            elif [ -f "$HOME/.zshrc" ]; then
+                source "$HOME/.zshrc" 2>/dev/null
+            fi
         else
             print_error "Unsupported OS. Please install uv manually: https://docs.astral.sh/uv/getting-started/installation/"
             return 1
@@ -82,8 +98,18 @@ check_uv() {
             print_success "uv installed successfully"
             return 0
         else
-            print_error "Failed to install uv"
-            return 1
+            print_warning "uv installation may have failed, trying alternative methods..."
+            
+            # Try to add to PATH manually
+            export PATH="$HOME/.local/bin:$PATH"
+            
+            if command_exists uv; then
+                print_success "uv found after manual PATH addition"
+                return 0
+            else
+                print_warning "uv not found, will try to use pip as fallback"
+                return 1
+            fi
         fi
     fi
 }
@@ -168,10 +194,23 @@ EOF
 install_dependencies() {
     print_status "Installing Python dependencies..."
     
-    if uv sync; then
-        print_success "Dependencies installed successfully"
+    # Try uv first
+    if command_exists uv; then
+        if uv sync; then
+            print_success "Dependencies installed successfully with uv"
+            return 0
+        else
+            print_warning "uv sync failed, trying pip as fallback"
+        fi
+    fi
+    
+    # Fallback to pip
+    print_status "Using pip to install dependencies..."
+    if pip install -r requirements.txt; then
+        print_success "Dependencies installed successfully with pip"
+        return 0
     else
-        print_error "Failed to install dependencies"
+        print_error "Failed to install dependencies with both uv and pip"
         return 1
     fi
 }
@@ -199,10 +238,18 @@ check_weights() {
 test_gpu() {
     print_status "Testing GPU acceleration..."
     
-    if uv run python test_gpu.py; then
-        print_success "GPU acceleration test passed"
+    if command_exists uv; then
+        if uv run python test_gpu.py; then
+            print_success "GPU acceleration test passed"
+        else
+            print_warning "GPU acceleration test failed - will use CPU"
+        fi
     else
-        print_warning "GPU acceleration test failed - will use CPU"
+        if python test_gpu.py; then
+            print_success "GPU acceleration test passed"
+        else
+            print_warning "GPU acceleration test failed - will use CPU"
+        fi
     fi
 }
 
@@ -217,10 +264,18 @@ start_server() {
     print_status "API will be available at: http://localhost:$port"
     print_status "API documentation at: http://localhost:$port/docs"
     
-    if [ "$mode" = "dev" ]; then
-        uv run python main.py --dev --port "$port"
+    if command_exists uv; then
+        if [ "$mode" = "dev" ]; then
+            uv run python main.py --dev --port "$port"
+        else
+            uv run python main.py --port "$port"
+        fi
     else
-        uv run python main.py --port "$port"
+        if [ "$mode" = "dev" ]; then
+            python main.py --dev --port "$port"
+        else
+            python main.py --port "$port"
+        fi
     fi
 }
 
