@@ -6,16 +6,20 @@ from pathlib import Path
 
 from models.config import AppConfig
 from services.detection_service import DetectionService
+from services.classification_service import ClassificationService
 from services.image_service import ImageService
 from api.routes import DetectionRoutes
+from api.classification_routes import ClassificationRoutes
 
 
 class LogoDetectionApp:
     def __init__(self):
         self.config = AppConfig()
         self.detection_service = DetectionService(self.config)
+        self.classification_service = ClassificationService(self.config)
         self.image_service = ImageService()
         self.detection_routes = DetectionRoutes(self.detection_service, self.image_service)
+        self.classification_routes = ClassificationRoutes(self.classification_service, self.image_service)
         self.app = None
     
     def create_app(self) -> FastAPI:
@@ -26,9 +30,14 @@ class LogoDetectionApp:
             # Startup
             print("🚀 Starting Logo Detection API...")
             if self.detection_service.is_model_loaded():
-                print("✅ Model loaded successfully")
+                print("✅ Detection model loaded successfully")
             else:
-                print("❌ Failed to load model")
+                print("❌ Failed to load detection model")
+            
+            if self.classification_service.is_model_loaded():
+                print("✅ Classification model loaded successfully")
+            else:
+                print("⚠️ No classification model loaded")
             
             yield
             
@@ -59,6 +68,7 @@ class LogoDetectionApp:
         
         # Include routes
         self.app.include_router(self.detection_routes.get_router(), prefix="/api")
+        self.app.include_router(self.classification_routes.get_router(), prefix="/api/classification")
         
         return self.app
     

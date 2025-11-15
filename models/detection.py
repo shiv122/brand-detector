@@ -15,3 +15,9 @@ class VideoFrameData(BaseModel):
     detections: List[Detection]
     total_detections: int
     timestamp: float
+
+
+class ClassificationResult(BaseModel):
+    class_id: int
+    class_name: str
+    confidence: float
