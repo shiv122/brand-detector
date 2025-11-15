@@ -66,6 +66,7 @@ class DetectionService:
         file_url: str,
         frames_per_second: int,
         confidence_threshold: float,
+        create_video: bool = False,
     ) -> StreamingResponse:
         """Detect logos in video from URL and stream results"""
         try:
@@ -207,6 +208,7 @@ class DetectionService:
                 confidence_threshold,
                 session_id,
                 frame_prefix,
+                create_video,
             ):
                 yield frame_data
 
@@ -240,6 +242,7 @@ class DetectionService:
         filename: str,
         frames_per_second: int,
         confidence_threshold: float,
+        create_video: bool = False,
     ) -> StreamingResponse:
         """Detect logos in video and stream results"""
         try:
@@ -281,6 +284,7 @@ class DetectionService:
                     confidence_threshold,
                     session_id,
                     frame_prefix,
+                    create_video,
                 ),
                 media_type="text/plain",
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
@@ -306,6 +310,7 @@ class DetectionService:
         confidence_threshold: float,
         session_id: str,
         frame_prefix: str,
+        create_video: bool = False,
     ) -> AsyncGenerator[str, None]:
         """Generate video frames with detections and create processed video using FFmpeg"""
         cap = cv2.VideoCapture(video_path)
@@ -339,6 +344,11 @@ class DetectionService:
             yield f"data: {json.dumps({'type': 'status', 'message': 'Starting video processing...', 'estimated_total_frames': estimated_processed_frames})}\n\n"
 
             # First pass: Process frames at specified interval and store results
+            # Batch frames for GPU processing (optimize for 16GB GPU memory)
+            batch_size = 8 if self.model_service.device == "cuda" else 4  # Larger batch for CUDA
+            frame_batch = []
+            frame_indices = []
+            
             while True:
                 ret, frame = cap.read()
                 if not ret:
@@ -346,66 +356,115 @@ class DetectionService:
 
                 # Process frames at specified interval
                 if frame_count % skip_frames == 0:
+                    frame_batch.append(frame)
+                    frame_indices.append(frame_count)
+                    
+                    # Process batch when full or at end
+                    if len(frame_batch) >= batch_size:
+                        # Process batch
+                        for batch_frame, idx in zip(frame_batch, frame_indices):
+                            try:
+                                # Run detection on frame
+                                detections, annotated_frame = (
+                                    self.model_service.detect_in_frame(
+                                        batch_frame, confidence_threshold
+                                    )
+                                )
+
+                                if annotated_frame is not None:
+                                    # Store detection results for this frame
+                                    detection_results[idx] = (
+                                        detections,
+                                        annotated_frame,
+                                    )
+
+                                    # Process frame for counting
+                                    timestamp = idx / cap.get(cv2.CAP_PROP_FPS)
+                                    frame_logo_counts = (
+                                        self.counting_service.process_frame_detections(
+                                            session_id, processed_count, detections, timestamp
+                                        )
+                                    )
+
+                                    # Save frame to static directory for frontend display
+                                    frame_filename = (
+                                        f"frame_{frame_prefix}_{processed_count:06d}.jpg"
+                                    )
+                                    frame_path = Path(self.config.frames_dir) / frame_filename
+                                    cv2.imwrite(str(frame_path), annotated_frame)
+                                    frame_path.touch()
+
+                                    frame_url = f"/static/frames/{frame_filename}"
+
+                                    # Create frame data with counting information
+                                    frame_data = {
+                                        "frame_number": processed_count,
+                                        "frame_url": frame_url,
+                                        "detections": [
+                                            detection.dict() for detection in detections
+                                        ],
+                                        "total_detections": len(detections),
+                                        "timestamp": timestamp,
+                                        "logo_counts": frame_logo_counts,
+                                        "session_summary": self.counting_service.get_session_summary(
+                                            session_id
+                                        ),
+                                    }
+
+                                    # Send frame data
+                                    yield f"data: {json.dumps({'type': 'frame', **frame_data})}\n\n"
+                                    processed_count += 1
+
+                            except Exception as e:
+                                print(f"Error processing frame {idx}: {str(e)}")
+                                # Store original frame if detection failed
+                                detection_results[idx] = ([], batch_frame)
+                        
+                        # Clear batch
+                        frame_batch = []
+                        frame_indices = []
+                        # Small async yield to prevent blocking
+                        await asyncio.sleep(0.001)
+
+                frame_count += 1
+            
+            # Process remaining frames in batch
+            if frame_batch:
+                for batch_frame, idx in zip(frame_batch, frame_indices):
                     try:
-                        # Run detection on frame
                         detections, annotated_frame = (
                             self.model_service.detect_in_frame(
-                                frame, confidence_threshold
+                                batch_frame, confidence_threshold
                             )
                         )
 
                         if annotated_frame is not None:
-                            # Store detection results for this frame
-                            detection_results[frame_count] = (
-                                detections,
-                                annotated_frame,
-                            )
-
-                            # Process frame for counting
-                            timestamp = frame_count / cap.get(cv2.CAP_PROP_FPS)
+                            detection_results[idx] = (detections, annotated_frame)
+                            timestamp = idx / cap.get(cv2.CAP_PROP_FPS)
                             frame_logo_counts = (
                                 self.counting_service.process_frame_detections(
                                     session_id, processed_count, detections, timestamp
                                 )
                             )
-
-                            # Save frame to static directory for frontend display
-                            # Use random prefix to avoid conflicts with concurrent video processing
-                            frame_filename = (
-                                f"frame_{frame_prefix}_{processed_count:06d}.jpg"
-                            )
+                            frame_filename = f"frame_{frame_prefix}_{processed_count:06d}.jpg"
                             frame_path = Path(self.config.frames_dir) / frame_filename
                             cv2.imwrite(str(frame_path), annotated_frame)
                             frame_path.touch()
-                            await asyncio.sleep(0.01)
-
                             frame_url = f"/static/frames/{frame_filename}"
-
-                            # Create frame data with counting information
                             frame_data = {
                                 "frame_number": processed_count,
                                 "frame_url": frame_url,
-                                "detections": [
-                                    detection.dict() for detection in detections
-                                ],
+                                "detections": [detection.dict() for detection in detections],
                                 "total_detections": len(detections),
                                 "timestamp": timestamp,
                                 "logo_counts": frame_logo_counts,
-                                "session_summary": self.counting_service.get_session_summary(
-                                    session_id
-                                ),
+                                "session_summary": self.counting_service.get_session_summary(session_id),
                             }
-
-                            # Send frame data
                             yield f"data: {json.dumps({'type': 'frame', **frame_data})}\n\n"
                             processed_count += 1
-
                     except Exception as e:
-                        print(f"Error processing frame {processed_count}: {str(e)}")
-                        # Store original frame if detection failed
-                        detection_results[frame_count] = ([], frame)
-
-                frame_count += 1
+                        print(f"Error processing frame {idx}: {str(e)}")
+                        detection_results[idx] = ([], batch_frame)
 
             # Finalize real-time CSV files
             self.counting_service.finalize_session_csv_files(session_id)
@@ -414,11 +473,57 @@ class DetectionService:
             print(
                 f"[PROCESSING] Detection phase complete: {processed_count} frames processed"
             )
-            processed_video_url = f"/static/{Path(processed_video_path).name}"
+            processed_video_url = f"/static/{Path(processed_video_path).name}" if create_video else None
             yield f"data: {json.dumps({'type': 'complete', 'message': 'Video processing completed', 'total_frames': processed_count, 'processed_video_url': processed_video_url})}\n\n"
 
-            # Reset video capture for second pass
-            cap.release()
+            # Only create video if requested
+            if create_video:
+                # Run video creation in background to avoid blocking
+                # Note: cap is kept open for background task, will be released there
+                asyncio.create_task(self._create_video_background(
+                    video_path, processed_video_path, temp_frames_dir, 
+                    detection_results, fps, frame_prefix, processed_video_url
+                ))
+            else:
+                # Clean up temp frames directory if not creating video
+                import shutil
+                if temp_frames_dir.exists():
+                    shutil.rmtree(temp_frames_dir, ignore_errors=True)
+                cap.release()
+                print(f"[PROCESSING] Video creation skipped (create_video=False)")
+
+        finally:
+            # Only release if not creating video (video creation handles its own release)
+            if not create_video and cap.isOpened():
+                cap.release()
+            # Clean up original video file after processing is complete
+            # Note: For video creation, cleanup happens in background task
+            if not create_video and video_path and os.path.exists(video_path):
+                try:
+                    print(
+                        f"[CLEANUP] Deleting original video file: {Path(video_path).name}"
+                    )
+                    os.unlink(video_path)
+                    print(f"[CLEANUP] Successfully deleted original video file")
+                except Exception as e:
+                    print(
+                        f"[CLEANUP WARNING] Failed to delete original video file: {str(e)}"
+                    )
+
+    async def _create_video_background(
+        self,
+        video_path: str,
+        processed_video_path: str,
+        temp_frames_dir: Path,
+        detection_results: dict,
+        fps: int,
+        frame_prefix: str,
+        processed_video_url: str,
+    ) -> None:
+        """Create video in background without blocking the main response"""
+        cap = None
+        try:
+            print(f"[VIDEO CREATION] Starting background video creation...")
             cap = cv2.VideoCapture(video_path)
             frame_count = 0
 
@@ -449,7 +554,6 @@ class DetectionService:
                     annotated_frame = frame
 
                 # Save frame to temp directory for video creation
-                # Use random prefix to avoid conflicts with concurrent video processing
                 frame_filename = f"frame_{frame_prefix}_{frame_count:06d}.jpg"
                 temp_frame_path = temp_frames_dir / frame_filename
                 cv2.imwrite(str(temp_frame_path), annotated_frame)
@@ -457,38 +561,37 @@ class DetectionService:
 
                 frame_count += 1
 
+            cap.release()
+
             # Use FFmpeg to create processed video from frames
-            print(f"[PROCESSING] Creating processed video with {frame_count} frames...")
+            print(f"[VIDEO CREATION] Creating processed video with {frame_count} frames...")
             await self._create_video_from_frames(
                 temp_frames_dir, processed_video_path, fps, frame_count, frame_prefix
             )
 
             # Clean up temp frames directory
             import shutil
-
-            print(f"[PROCESSING] Cleaning up temporary frames...")
+            print(f"[VIDEO CREATION] Cleaning up temporary frames...")
             shutil.rmtree(temp_frames_dir, ignore_errors=True)
 
-            # Send video creation completion message
-            print(
-                f"[PROCESSING] Video processing complete: {Path(processed_video_path).name}"
-            )
-            yield f"data: {json.dumps({'type': 'video_ready', 'message': 'Video with detections created successfully', 'processed_video_url': processed_video_url})}\n\n"
-
-        finally:
-            cap.release()
-            # Clean up original video file after processing is complete
+            print(f"[VIDEO CREATION] Video creation complete: {Path(processed_video_path).name}")
+            
+            # Clean up original video file after video creation is complete
             if video_path and os.path.exists(video_path):
                 try:
-                    print(
-                        f"[CLEANUP] Deleting original video file: {Path(video_path).name}"
-                    )
+                    print(f"[CLEANUP] Deleting original video file: {Path(video_path).name}")
                     os.unlink(video_path)
                     print(f"[CLEANUP] Successfully deleted original video file")
                 except Exception as e:
-                    print(
-                        f"[CLEANUP WARNING] Failed to delete original video file: {str(e)}"
-                    )
+                    print(f"[CLEANUP WARNING] Failed to delete original video file: {str(e)}")
+        except Exception as e:
+            print(f"[VIDEO CREATION ERROR] Failed to create video: {str(e)}")
+            import shutil
+            if temp_frames_dir.exists():
+                shutil.rmtree(temp_frames_dir, ignore_errors=True)
+        finally:
+            if cap is not None:
+                cap.release()
 
     async def _create_video_from_frames(
         self,

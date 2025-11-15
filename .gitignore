@@ -16,3 +16,12 @@ node_modules/
 
 # Python
 venv/
+
+
+static/csv_reports/*
+static/frames/*
+static/temp_frames/*
+logs/*
+.env
+.env.*
+!.env.example
