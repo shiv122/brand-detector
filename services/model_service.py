@@ -105,9 +105,13 @@ class ModelService:
                             )
                         # Use FP16 for faster inference on modern GPUs
                         if torch.cuda.is_available():
+                            props = torch.cuda.get_device_properties(0)
+                            total_memory_gb = props.total_memory / 1024**3
+                            device_name = props.name
                             print(
-                                f"🚀 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB"
+                                f"🚀 GPU: {device_name} | Total Memory: {total_memory_gb:.1f}GB"
                             )
+                            print(f"⚡ Optimizations: FP16=True, CUDNN Benchmark=True")
                             # Enable memory efficient operations
                             torch.backends.cudnn.deterministic = False
                             torch.backends.cudnn.benchmark = True

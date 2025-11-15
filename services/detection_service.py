@@ -84,6 +84,7 @@ class DetectionService:
                     filename,
                     frames_per_second,
                     confidence_threshold,
+                    create_video,
                 ),
                 media_type="text/plain",
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
@@ -100,12 +101,14 @@ class DetectionService:
         filename: str,
         frames_per_second: int,
         confidence_threshold: float,
+        create_video: bool = False,
     ) -> AsyncGenerator[str, None]:
         """Download video from URL with progress updates, then process it"""
         video_path = None
         try:
             # Send initial download status
             print(f"[DOWNLOAD] Connecting to server: {file_url}")
+            print(f"[DOWNLOAD] Create video: {create_video}")
             yield f"data: {json.dumps({'type': 'download_status', 'status': 'Connecting to server...', 'percentage': 0})}\n\n"
 
             # Download video from URL
@@ -344,8 +347,10 @@ class DetectionService:
             yield f"data: {json.dumps({'type': 'status', 'message': 'Starting video processing...', 'estimated_total_frames': estimated_processed_frames})}\n\n"
 
             # First pass: Process frames at specified interval and store results
-            # Batch frames for GPU processing (optimize for 16GB GPU memory)
+            # Batch frames for GPU processing (optimize for GPU memory)
             batch_size = 8 if self.model_service.device == "cuda" else 4  # Larger batch for CUDA
+            if self.model_service.device == "cuda":
+                print(f"[PROCESSING] Using batch size: {batch_size} for CUDA GPU acceleration")
             frame_batch = []
             frame_indices = []
             
