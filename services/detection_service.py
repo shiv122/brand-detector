@@ -7,6 +7,7 @@ import tempfile
 import time
 import subprocess
 import secrets
+import httpx
 from pathlib import Path
 from typing import AsyncGenerator, List, Tuple, Optional
 from ultralytics import YOLO
@@ -59,6 +60,179 @@ class DetectionService:
     ) -> Tuple[List[Detection], Optional[np.ndarray]]:
         """Detect logos in a single image"""
         return self.model_service.detect_in_image(image_data, confidence_threshold)
+
+    async def detect_video_from_url(
+        self,
+        file_url: str,
+        frames_per_second: int,
+        confidence_threshold: float,
+    ) -> StreamingResponse:
+        """Detect logos in video from URL and stream results"""
+        try:
+            # Extract filename from URL or generate one
+            filename = file_url.split("/")[-1].split("?")[0] or "video.mp4"
+
+            # Validate URL
+            if not file_url.startswith(("http://", "https://")):
+                raise HTTPException(status_code=400, detail="Invalid URL format")
+
+            # Create streaming response that includes download progress
+            return StreamingResponse(
+                self._download_and_process_video_from_url(
+                    file_url,
+                    filename,
+                    frames_per_second,
+                    confidence_threshold,
+                ),
+                media_type="text/plain",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            )
+
+        except Exception as e:
+            raise HTTPException(
+                status_code=500, detail=f"Error processing video from URL: {str(e)}"
+            )
+
+    async def _download_and_process_video_from_url(
+        self,
+        file_url: str,
+        filename: str,
+        frames_per_second: int,
+        confidence_threshold: float,
+    ) -> AsyncGenerator[str, None]:
+        """Download video from URL with progress updates, then process it"""
+        video_path = None
+        try:
+            # Send initial download status
+            print(f"[DOWNLOAD] Connecting to server: {file_url}")
+            yield f"data: {json.dumps({'type': 'download_status', 'status': 'Connecting to server...', 'percentage': 0})}\n\n"
+
+            # Download video from URL
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                async with client.stream("GET", file_url) as response:
+                    if response.status_code != 200:
+                        error_msg = (
+                            f"Failed to download video from URL: {response.status_code}"
+                        )
+                        print(f"[DOWNLOAD ERROR] {error_msg}")
+                        yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
+                        return
+
+                    # Save video to permanent location
+                    video_filename = f"uploaded_{int(time.time())}_{filename}"
+                    video_path = Path(self.config.static_dir) / video_filename
+
+                    total_size = int(response.headers.get("content-length", 0))
+                    downloaded = 0
+
+                    print(f"[DOWNLOAD] Starting download: {video_filename}")
+                    if total_size > 0:
+                        print(
+                            f"[DOWNLOAD] Total size: {total_size / (1024*1024):.2f} MB"
+                        )
+                    else:
+                        print(f"[DOWNLOAD] Total size: Unknown (streaming)")
+
+                    last_progress_update = 0
+                    # Update progress every 1% or every 1MB, whichever is smaller
+                    progress_update_interval = (
+                        max(1024 * 1024, total_size // 100)
+                        if total_size > 0
+                        else 1024 * 1024  # 1MB intervals if size unknown
+                    )
+
+                    with open(video_path, "wb") as f:
+                        async for chunk in response.aiter_bytes():
+                            f.write(chunk)
+                            downloaded += len(chunk)
+
+                            # Send progress updates periodically
+                            if (
+                                downloaded - last_progress_update
+                                >= progress_update_interval
+                            ):
+                                last_progress_update = downloaded
+
+                                if total_size > 0:
+                                    # Calculate actual percentage (0-100%)
+                                    percentage = int((downloaded / total_size) * 100)
+                                    mb_downloaded = downloaded / (1024 * 1024)
+                                    mb_total = total_size / (1024 * 1024)
+                                    status_msg = f"Downloading... {mb_downloaded:.2f}MB / {mb_total:.2f}MB ({percentage}%)"
+                                    print(f"[DOWNLOAD] {status_msg}")
+                                    yield f"data: {json.dumps({'type': 'download_status', 'status': status_msg, 'percentage': percentage})}\n\n"
+                                else:
+                                    # If we don't know the total size, show downloaded amount
+                                    mb_downloaded = downloaded / (1024 * 1024)
+                                    # Estimate percentage based on reasonable video sizes (assume max 500MB for progress)
+                                    estimated_percentage = min(
+                                        95, int((mb_downloaded / 500) * 100)
+                                    )
+                                    status_msg = f"Downloaded {mb_downloaded:.2f}MB..."
+                                    print(
+                                        f"[DOWNLOAD] {status_msg} (estimated {estimated_percentage}%)"
+                                    )
+                                    yield f"data: {json.dumps({'type': 'download_status', 'status': status_msg, 'percentage': estimated_percentage})}\n\n"
+
+            # Download complete
+            print(f"[DOWNLOAD] Download complete: {downloaded / (1024*1024):.2f} MB")
+            yield f"data: {json.dumps({'type': 'download_status', 'status': 'Download complete, starting processing...', 'percentage': 100})}\n\n"
+
+            # Get video information
+            video_fps, total_frames, width, height = self.image_service.get_video_info(
+                str(video_path)
+            )
+            skip_frames = self.image_service.calculate_skip_frames(
+                video_fps, frames_per_second
+            )
+
+            # Create processed video path
+            processed_video_filename = f"processed_{int(time.time())}_{filename}"
+            processed_video_path = (
+                Path(self.config.static_dir) / processed_video_filename
+            )
+
+            # Create session ID for counting
+            session_id = f"video_{int(time.time())}_{filename.replace('.', '_')}"
+            self.counting_service.reset_session(session_id)
+
+            # Generate unique random identifier for this video processing session
+            frame_prefix = secrets.token_hex(8)
+
+            # Process video frames (this will handle cleanup of video_path in its finally block)
+            async for frame_data in self._generate_video_frames(
+                str(video_path),
+                str(processed_video_path),
+                skip_frames,
+                confidence_threshold,
+                session_id,
+                frame_prefix,
+            ):
+                yield frame_data
+
+        except httpx.TimeoutException:
+            error_msg = "Timeout while downloading video from URL"
+            print(f"[DOWNLOAD ERROR] {error_msg}")
+            yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
+        except httpx.RequestError as e:
+            error_msg = f"Error downloading video from URL: {str(e)}"
+            print(f"[DOWNLOAD ERROR] {error_msg}")
+            yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
+        except Exception as e:
+            error_msg = f"Error processing video from URL: {str(e)}"
+            print(f"[DOWNLOAD ERROR] {error_msg}")
+            yield f"data: {json.dumps({'type': 'error', 'message': error_msg})}\n\n"
+        finally:
+            # Clean up video file if it still exists (in case processing didn't complete)
+            if video_path and video_path.exists():
+                try:
+                    print(f"[CLEANUP] Deleting original video file: {video_path.name}")
+                    os.unlink(video_path)
+                    print(f"[CLEANUP] Successfully deleted original video file")
+                except Exception as e:
+                    print(
+                        f"[CLEANUP WARNING] Failed to delete original video file: {str(e)}"
+                    )
 
     async def detect_video(
         self,
@@ -158,6 +332,10 @@ class DetectionService:
 
         try:
             # Send initial status with estimated total frames
+            print(f"[PROCESSING] Starting video processing: {Path(video_path).name}")
+            print(
+                f"[PROCESSING] Total frames: {total_video_frames}, Processing: {estimated_processed_frames} frames at {skip_frames}x interval"
+            )
             yield f"data: {json.dumps({'type': 'status', 'message': 'Starting video processing...', 'estimated_total_frames': estimated_processed_frames})}\n\n"
 
             # First pass: Process frames at specified interval and store results
@@ -233,6 +411,9 @@ class DetectionService:
             self.counting_service.finalize_session_csv_files(session_id)
 
             # Send completion message immediately after detection phase
+            print(
+                f"[PROCESSING] Detection phase complete: {processed_count} frames processed"
+            )
             processed_video_url = f"/static/{Path(processed_video_path).name}"
             yield f"data: {json.dumps({'type': 'complete', 'message': 'Video processing completed', 'total_frames': processed_count, 'processed_video_url': processed_video_url})}\n\n"
 
@@ -277,6 +458,7 @@ class DetectionService:
                 frame_count += 1
 
             # Use FFmpeg to create processed video from frames
+            print(f"[PROCESSING] Creating processed video with {frame_count} frames...")
             await self._create_video_from_frames(
                 temp_frames_dir, processed_video_path, fps, frame_count, frame_prefix
             )
@@ -284,18 +466,29 @@ class DetectionService:
             # Clean up temp frames directory
             import shutil
 
+            print(f"[PROCESSING] Cleaning up temporary frames...")
             shutil.rmtree(temp_frames_dir, ignore_errors=True)
 
             # Send video creation completion message
+            print(
+                f"[PROCESSING] Video processing complete: {Path(processed_video_path).name}"
+            )
             yield f"data: {json.dumps({'type': 'video_ready', 'message': 'Video with detections created successfully', 'processed_video_url': processed_video_url})}\n\n"
 
         finally:
             cap.release()
-            # Clean up original video file
-            try:
-                os.unlink(video_path)
-            except:
-                pass
+            # Clean up original video file after processing is complete
+            if video_path and os.path.exists(video_path):
+                try:
+                    print(
+                        f"[CLEANUP] Deleting original video file: {Path(video_path).name}"
+                    )
+                    os.unlink(video_path)
+                    print(f"[CLEANUP] Successfully deleted original video file")
+                except Exception as e:
+                    print(
+                        f"[CLEANUP WARNING] Failed to delete original video file: {str(e)}"
+                    )
 
     async def _create_video_from_frames(
         self,

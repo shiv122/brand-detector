@@ -141,17 +141,13 @@ class DetectionRoutes:
 
         @self.router.post("/video/detect")
         async def detect_logos_video(
-            file: UploadFile = File(...),
+            file: UploadFile = File(None),
+            file_url: str = Form(None),
             frames_per_second: int = Form(2),
             confidence_threshold: float = Form(0.5),
         ):
             if not self.detection_service.is_model_loaded():
                 raise HTTPException(status_code=500, detail="Model not loaded")
-
-            if not self.image_service.validate_video_file(
-                file.content_type, file.filename
-            ):
-                raise HTTPException(status_code=400, detail="File must be a video")
 
             if frames_per_second < 1 or frames_per_second > 30:
                 raise HTTPException(
@@ -164,17 +160,41 @@ class DetectionRoutes:
                     detail="Confidence threshold must be between 0.0 and 1.0",
                 )
 
-            try:
-                contents = await file.read()
-                return await self.detection_service.detect_video(
-                    contents, file.filename, frames_per_second, confidence_threshold
+            # Validate that either file or file_url is provided
+            if not file and not file_url:
+                raise HTTPException(
+                    status_code=400, detail="Either file or file_url must be provided"
                 )
 
-            except Exception as e:
-                print(f"Error processing video {file.filename}: {str(e)}")
+            if file and file_url:
                 raise HTTPException(
-                    status_code=500, detail=f"Error processing video: {str(e)}"
+                    status_code=400, detail="Provide either file or file_url, not both"
                 )
+
+            try:
+                if file_url:
+                    # Download video from URL
+                    return await self.detection_service.detect_video_from_url(
+                        file_url, frames_per_second, confidence_threshold
+                    )
+                else:
+                    # Process uploaded file
+                    if not self.image_service.validate_video_file(
+                        file.content_type, file.filename
+                    ):
+                        raise HTTPException(status_code=400, detail="File must be a video")
+
+                    contents = await file.read()
+                    return await self.detection_service.detect_video(
+                        contents, file.filename, frames_per_second, confidence_threshold
+                    )
+
+            except Exception as e:
+                error_msg = f"Error processing video: {str(e)}"
+                if file:
+                    error_msg = f"Error processing video {file.filename}: {str(e)}"
+                print(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
 
         @self.router.get("/session/{session_id}/summary")
         async def get_session_summary(session_id: str):
