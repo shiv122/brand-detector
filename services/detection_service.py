@@ -127,6 +127,7 @@ class DetectionService:
                     frames_per_second,
                     confidence_threshold,
                     create_video,
+                    enable_classification,
                 ),
                 media_type="text/plain",
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
@@ -144,6 +145,7 @@ class DetectionService:
         frames_per_second: int,
         confidence_threshold: float,
         create_video: bool = False,
+        enable_classification: bool = False,
     ) -> AsyncGenerator[str, None]:
         """Download video from URL with progress updates, then process it"""
         video_path = None
