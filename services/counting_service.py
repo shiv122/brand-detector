@@ -94,9 +94,9 @@ class LogoCountingService:
                 "Brand",
                 "Frame Number",
                 "Timestamp",
-                "Count in Frame",
-                "Confidences",
-                "Bounding Boxes",
+                "Confidence",
+                "Bounding Box",
+                "Classification",
             ]
         )
 
@@ -121,32 +121,32 @@ class LogoCountingService:
         if session_id not in self.csv_writers:
             return
 
-        # Write to main CSV file (group detections by brand for this frame)
+        # Write to main CSV file (one row per detection)
         main_writer = self.csv_writers[session_id]["main"]["writer"]
-        brand_to_boxes: Dict[str, list] = defaultdict(list)
-        brand_to_confidences: Dict[str, list] = defaultdict(list)
 
         for detection in detections:
             box = detection.bbox
-            brand_to_boxes[detection.class_name].append(
-                f"[{box[0]:.1f},{box[1]:.1f},{box[2]:.1f},{box[3]:.1f}]"
-            )
-            brand_to_confidences[detection.class_name].append(
-                f"{detection.confidence:.3f}"
-            )
-
-        for brand, boxes in brand_to_boxes.items():
-            count_in_frame = len(boxes)
-            boxes_str = ", ".join(boxes)  # comma-separated bounding boxes
-            confidences_str = ", ".join(brand_to_confidences[brand])
+            box_str = f"[{box[0]:.1f},{box[1]:.1f},{box[2]:.1f},{box[3]:.1f}]"
+            confidence_str = f"{detection.confidence:.3f}"
+            
+            # Format classification results if available
+            if detection.classification and len(detection.classification) > 0:
+                top_class = detection.classification[0]
+                classification_str = f"{top_class.class_name} ({top_class.confidence:.2%})"
+                if len(detection.classification) > 1:
+                    classification_str += f" | {detection.classification[1].class_name} ({detection.classification[1].confidence:.2%})"
+            else:
+                classification_str = "N/A"
+            
+            # Write one row per detection
             main_writer.writerow(
                 [
-                    brand,  # Brand
-                    frame_number,
-                    f"{timestamp:.2f}",
-                    count_in_frame,  # Count in frame (grouped)
-                    confidences_str,  # List of confidences for this group
-                    boxes_str,  # Comma-separated bounding boxes
+                    detection.class_name,  # Brand
+                    frame_number,  # Frame number (repeated for each detection)
+                    f"{timestamp:.2f}",  # Timestamp (repeated for each detection)
+                    confidence_str,  # Single confidence value
+                    box_str,  # Single bounding box
+                    classification_str,  # Classification result
                 ]
             )
 

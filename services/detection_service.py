@@ -15,10 +15,11 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
 from models.config import AppConfig
-from models.detection import Detection
+from models.detection import Detection, ClassificationResult
 from services.model_service import ModelService
 from services.image_service import ImageService
 from services.counting_service import LogoCountingService
+from services.classification_service import ClassificationService
 
 
 class DetectionService:
@@ -27,6 +28,7 @@ class DetectionService:
         self.model_service = ModelService(config)
         self.image_service = ImageService()
         self.counting_service = LogoCountingService(config.static_dir)
+        self.classification_service = ClassificationService(config)
 
         # Ensure directories exist
         self._setup_directories()
@@ -55,6 +57,45 @@ class DetectionService:
         """Switch to a different weight"""
         return self.model_service.switch_model(weight_name)
 
+    def _crop_detection_box(self, frame: np.ndarray, bbox: List[float], padding: int = 40) -> np.ndarray:
+        """Crop detection box from frame with padding"""
+        x1, y1, x2, y2 = bbox
+        height, width = frame.shape[:2]
+        
+        # Add padding and ensure within bounds
+        x1 = max(0, int(x1) - padding)
+        y1 = max(0, int(y1) - padding)
+        x2 = min(width, int(x2) + padding)
+        y2 = min(height, int(y2) + padding)
+        
+        # Crop the region
+        cropped = frame[y1:y2, x1:x2]
+        return cropped
+    
+    def _classify_detection(self, frame: np.ndarray, detection: Detection) -> Optional[List[ClassificationResult]]:
+        """Classify a detection by cropping and running classification model"""
+        if not self.classification_service.is_model_loaded():
+            return None
+        
+        try:
+            # Crop detection box with padding
+            cropped = self._crop_detection_box(frame, detection.bbox, padding=40)
+            
+            if cropped.size == 0:
+                return None
+            
+            # Convert to bytes for classification
+            _, buffer = cv2.imencode('.jpg', cropped)
+            image_bytes = buffer.tobytes()
+            
+            # Run classification
+            classification_results = self.classification_service.classify_image(image_bytes, top_k=3)
+            
+            return classification_results
+        except Exception as e:
+            print(f"[CLASSIFICATION] Error classifying detection: {str(e)}")
+            return None
+
     def detect_in_image(
         self, image_data: bytes, confidence_threshold: float = 0.5
     ) -> Tuple[List[Detection], Optional[np.ndarray]]:
@@ -67,6 +108,7 @@ class DetectionService:
         frames_per_second: int,
         confidence_threshold: float,
         create_video: bool = False,
+        enable_classification: bool = False,
     ) -> StreamingResponse:
         """Detect logos in video from URL and stream results"""
         try:
@@ -212,6 +254,7 @@ class DetectionService:
                 session_id,
                 frame_prefix,
                 create_video,
+                enable_classification,
             ):
                 yield frame_data
 
@@ -246,6 +289,7 @@ class DetectionService:
         frames_per_second: int,
         confidence_threshold: float,
         create_video: bool = False,
+        enable_classification: bool = False,
     ) -> StreamingResponse:
         """Detect logos in video and stream results"""
         try:
@@ -288,6 +332,7 @@ class DetectionService:
                     session_id,
                     frame_prefix,
                     create_video,
+                    enable_classification,
                 ),
                 media_type="text/plain",
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
@@ -314,6 +359,7 @@ class DetectionService:
         session_id: str,
         frame_prefix: str,
         create_video: bool = False,
+        enable_classification: bool = False,
     ) -> AsyncGenerator[str, None]:
         """Generate video frames with detections and create processed video using FFmpeg"""
         cap = cv2.VideoCapture(video_path)
@@ -377,6 +423,15 @@ class DetectionService:
                                 )
 
                                 if annotated_frame is not None:
+                                    # Run classification on detections if enabled
+                                    if enable_classification and self.classification_service.is_model_loaded():
+                                        for detection in detections:
+                                            classification_results = self._classify_detection(
+                                                batch_frame, detection
+                                            )
+                                            if classification_results:
+                                                detection.classification = classification_results
+                                    
                                     # Store detection results for this frame
                                     detection_results[idx] = (
                                         detections,
@@ -444,6 +499,15 @@ class DetectionService:
                         )
 
                         if annotated_frame is not None:
+                            # Run classification on detections if enabled
+                            if enable_classification and self.classification_service.is_model_loaded():
+                                for detection in detections:
+                                    classification_results = self._classify_detection(
+                                        batch_frame, detection
+                                    )
+                                    if classification_results:
+                                        detection.classification = classification_results
+                            
                             detection_results[idx] = (detections, annotated_frame)
                             timestamp = idx / cap.get(cv2.CAP_PROP_FPS)
                             frame_logo_counts = (

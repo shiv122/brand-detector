@@ -7,6 +7,7 @@ class Detection(BaseModel):
     confidence: float
     class_id: int
     class_name: str
+    classification: Optional[List["ClassificationResult"]] = None
 
 
 class VideoFrameData(BaseModel):

@@ -146,6 +146,7 @@ class DetectionRoutes:
             frames_per_second: int = Form(2),
             confidence_threshold: float = Form(0.5),
             create_video: bool = Form(False),
+            enable_classification: bool = Form(False),
         ):
             if not self.detection_service.is_model_loaded():
                 raise HTTPException(status_code=500, detail="Model not loaded")
@@ -176,7 +177,7 @@ class DetectionRoutes:
                 if file_url:
                     # Download video from URL
                     return await self.detection_service.detect_video_from_url(
-                        file_url, frames_per_second, confidence_threshold, create_video
+                        file_url, frames_per_second, confidence_threshold, create_video, enable_classification
                     )
                 else:
                     # Process uploaded file
@@ -187,7 +188,7 @@ class DetectionRoutes:
 
                     contents = await file.read()
                     return await self.detection_service.detect_video(
-                        contents, file.filename, frames_per_second, confidence_threshold, create_video
+                        contents, file.filename, frames_per_second, confidence_threshold, create_video, enable_classification
                     )
 
             except Exception as e:

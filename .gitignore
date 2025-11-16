@@ -24,4 +24,8 @@ static/temp_frames/*
 logs/*
 .env
 .env.*
+static/*
+
+!static/**/
 !.env.example
+
